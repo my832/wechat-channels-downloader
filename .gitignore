@@ -1,0 +1,10 @@
+# runtime components (auto-downloaded on first run)
+tools/
+
+# captures & media (never commit)
+*.mp4
+*.etl
+*.pcapng
+flows.mitm
+*.log
+*.zip

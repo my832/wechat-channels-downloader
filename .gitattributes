@@ -1,0 +1,13 @@
+# 统一换行符：仓库内一律 LF，避免跨平台 clone 出现整文件 diff
+* text=auto eol=lf
+
+# 二进制文件不要做任何转换
+*.ico binary
+*.png binary
+*.exe binary
+*.wasm binary
+*.zip binary
+
+# Windows 脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

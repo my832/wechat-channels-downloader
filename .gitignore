@@ -1,10 +1,8 @@
-# runtime components (auto-downloaded on first run)
+node_modules/
+dist/
 tools/
-
-# captures & media (never commit)
-*.mp4
-*.etl
-*.pcapng
-flows.mitm
 *.log
-*.zip
+*.mitm
+config.json
+.DS_Store
+Thumbs.db

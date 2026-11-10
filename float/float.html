@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+    <title>下载</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      html, body {
+        width: 132px;
+        height: 132px;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      }
+
+      .wrap {
+        width: 132px;
+        height: 132px;
+        display: grid;
+        place-items: center;
+        -webkit-app-region: no-drag;
+      }
+
+      .ball {
+        position: relative;
+        width: 92px;
+        height: 92px;
+        border-radius: 50%;
+        background: linear-gradient(150deg, #3b74f5 0%, #6a55ee 100%);
+        color: #fff;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        cursor: grab;
+        box-shadow:
+          0 6px 18px rgba(52, 92, 235, 0.42),
+          0 2px 6px rgba(20, 30, 60, 0.18),
+          inset 0 1px 0 rgba(255, 255, 255, 0.32);
+        transition: transform 0.16s cubic-bezier(0.34, 1.4, 0.6, 1), box-shadow 0.16s, filter 0.16s;
+      }
+
+      .ball:hover {
+        transform: scale(1.055);
+        box-shadow:
+          0 10px 26px rgba(52, 92, 235, 0.5),
+          0 3px 8px rgba(20, 30, 60, 0.2),
+          inset 0 1px 0 rgba(255, 255, 255, 0.34);
+      }
+
+      .ball:active { cursor: grabbing; transform: scale(0.955); }
+
+      .ball svg { width: 30px; height: 30px; display: block; }
+
+      .label {
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+        opacity: 0.94;
+      }
+
+      /* halo ring when a video url has been captured */
+      .ball.ready::before {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        border: 2px solid rgba(23, 178, 106, 0.55);
+        animation: halo 1.8s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes halo {
+        0%, 100% { opacity: 0.35; transform: scale(1); }
+        50% { opacity: 0.9; transform: scale(1.045); }
+      }
+
+      /* busy state */
+      .ball.busy { cursor: progress; filter: saturate(0.85); }
+      .ball.busy::before {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        border: 2.5px solid rgba(255, 255, 255, 0.28);
+        border-top-color: #fff;
+        animation: spin 0.85s linear infinite;
+        pointer-events: none;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .spinner {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        border: 2.6px solid rgba(255, 255, 255, 0.3);
+        border-top-color: #fff;
+        animation: spin 0.8s linear infinite;
+      }
+
+      .badge {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        min-width: 20px;
+        height: 20px;
+        padding: 0 5px;
+        border-radius: 999px;
+        background: #17b26a;
+        border: 2px solid #fff;
+        color: #fff;
+        font-size: 11px;
+        font-weight: 800;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        font-variant-numeric: tabular-nums;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+      }
+      .badge.show { display: flex; }
+
+      .done-flash {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: #17b26a;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .done-flash.go { animation: flash 0.85s ease-out; }
+      @keyframes flash {
+        0% { opacity: 0.85; }
+        100% { opacity: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="ball" id="ball" title="下载当前播放的视频号视频 · 按住可拖动位置">
+        <span class="done-flash" id="flash"></span>
+        <svg id="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 3.6v10.4m0 0 4.3-4.3M12 14l-4.3-4.3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M4.6 16.4v1.3a2.3 2.3 0 0 0 2.3 2.3h10.2a2.3 2.3 0 0 0 2.3-2.3v-1.3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+        <span class="label" id="label">下载</span>
+        <span class="badge" id="badge">0</span>
+      </div>
+    </div>
+
+    <script>
+      const ball = document.getElementById("ball");
+      const label = document.getElementById("label");
+      const badge = document.getElementById("badge");
+      const flash = document.getElementById("flash");
+      const ico = document.getElementById("ico");
+
+      let busy = false;
+      let pressed = false;
+
+      /* ---- click / drag ---- */
+      ball.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        pressed = true;
+        e.preventDefault();
+        window.api.press();
+      });
+
+      const release = () => {
+        if (!pressed) return;
+        pressed = false;
+        window.api.release();
+      };
+
+      window.addEventListener("pointerup", release);
+      window.addEventListener("blur", release);
+      window.addEventListener("pointercancel", release);
+
+      ball.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        window.api.contextMenu();
+      });
+
+      /* ---- state from main ---- */
+      function setBusy(on) {
+        busy = on;
+        ball.classList.toggle("busy", on);
+        label.textContent = on ? "处理中" : "下载";
+        if (on) {
+          ico.outerHTML = '<div class="spinner" id="ico"></div>';
+        } else {
+          const s = document.getElementById("ico");
+          if (s) {
+            s.outerHTML =
+              '<svg id="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+              '<path d="M12 3.6v10.4m0 0 4.3-4.3M12 14l-4.3-4.3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>' +
+              '<path d="M4.6 16.4v1.3a2.3 2.3 0 0 0 2.3 2.3h10.2a2.3 2.3 0 0 0 2.3-2.3v-1.3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+          }
+        }
+      }
+
+      window.api.onState(({ state }) => {
+        setBusy(state === "downloading");
+        if (state !== "downloading") ball.classList.remove("ready");
+      });
+
+      window.api.onCaptured((n) => {
+        if (n > 0 && !busy) {
+          ball.classList.add("ready");
+          badge.textContent = n > 99 ? "99+" : String(n);
+          badge.classList.add("show");
+        } else if (n === 0) {
+          badge.classList.remove("show");
+          ball.classList.remove("ready");
+        }
+      });
+
+      window.api.onDone(() => {
+        setBusy(false);
+        flash.classList.remove("go");
+        void flash.offsetWidth;
+        flash.classList.add("go");
+        ball.classList.remove("ready");
+        badge.classList.remove("show");
+      });
+
+      window.api.onFailed(() => {
+        setBusy(false);
+      });
+
+      window.api.snapshot().then((s) => {
+        if (s.state === "downloading") setBusy(true);
+        if (s.captured > 0) {
+          ball.classList.add("ready");
+          badge.textContent = s.captured > 99 ? "99+" : String(s.captured);
+          badge.classList.add("show");
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,70 @@
+{
+  "name": "wechat-channels-downloader",
+  "version": "1.0.0",
+  "description": "微信视频号视频下载器 - 抓取并解密视频号视频",
+  "main": "main.js",
+  "author": "local build (engine: my832)",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "rcedit": "^5.0.1"
+  },
+  "build": {
+    "appId": "com.local.wxchannelsdl",
+    "productName": "WeChatChannelsDownloader",
+    "copyright": "Personal backup tool",
+    "asar": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "engine.js",
+      "package.json",
+      "renderer/**/*",
+      "float/**/*",
+      "assets/**/*",
+      "!tools/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false,
+      "artifactName": "视频号下载器_安装包_${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "视频号下载器",
+      "uninstallDisplayName": "视频号下载器",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052"
+    }
+  }
+}

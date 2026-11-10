@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+    <title>视频号视频下载器</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M12 3v11m0 0 4.2-4.2M12 14l-4.2-4.2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 16.5v1.2A2.3 2.3 0 0 0 6.3 20h11.4a2.3 2.3 0 0 0 2.3-2.3v-1.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-title">视频号视频下载器</div>
+          <div class="brand-sub">微信视频号 · 内存读取与解密</div>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <div class="status-chip" id="statusChip">
+          <span class="dot" id="statusDot"></span>
+          <span id="statusText">正在启动…</span>
+        </div>
+        <label class="switch" title="显示/隐藏屏幕右侧的悬浮下载按钮">
+          <input type="checkbox" id="floatSwitch" checked />
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-label">悬浮按钮</span>
+        </label>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="col col-left">
+        <div class="card stat-card">
+          <div class="stat-value" id="capturedCount">0</div>
+          <div class="stat-label">本次找到的视频</div>
+          <div class="stat-hint" id="statHint">点下载时读取微信内存，定位正在播放的那一条</div>
+        </div>
+
+        <button class="primary-btn" id="downloadBtn">
+          <span class="btn-ico">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 4v10m0 0 4-4m-4 4-4-4" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M5 17.5h14" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="btn-text">
+            <span class="btn-title" id="btnTitle">下载当前视频</span>
+            <span class="btn-sub" id="btnSub">抓取正在播放的这一条</span>
+          </span>
+        </button>
+
+        <div class="card steps-card">
+          <div class="card-title">使用步骤</div>
+          <ol class="steps">
+            <li><span class="n">1</span>在微信里打开视频号，点开要下载的视频</li>
+            <li><span class="n">2</span>保持播放器窗口打开（别关掉）</li>
+            <li><span class="n">3</span>点上面按钮，或点屏幕右侧的悬浮球</li>
+            <li><span class="n">4</span>等它下载 + 解密完成，文件存到下面目录</li>
+          </ol>
+        </div>
+
+        <div class="card outdir-card">
+          <div class="card-title">保存位置</div>
+          <div class="outdir-row">
+            <span class="outdir-path" id="outDir">—</span>
+            <button class="mini-btn" id="chooseBtn">更改</button>
+            <button class="mini-btn" id="openBtn">打开</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="col col-right">
+        <div class="card log-card">
+          <div class="log-head">
+            <div class="card-title">运行日志</div>
+            <button class="mini-btn ghost" id="clearBtn">清空</button>
+          </div>
+          <div class="log-body" id="logBody"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span id="footHint">不修改系统代理 · 不安装证书 · 不影响 Clash 等代理工具</span>
+      <span class="ver">v1.0.0</span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -233,7 +233,7 @@ function scanWeChatVideos() {
     const keyPos = keyM[keyM.length - 1].index;
 
     const tokenM = [...text.matchAll(tokenRe)];
-    const token = tokenM.length ? tokenM[0][1].replace(/\\+$/, "") : "";
+    const token = tokenM.length ? tokenM[tokenM.length - 1][1].replace(/\\+$/, "") : "";
 
     // urls appearing BEFORE the decode_key belong to this object
     const urls = [...text.matchAll(urlRe)]
@@ -477,8 +477,19 @@ async function doDownload() {
     const Module = await loadWasmModule();
     if (!Module || !Module.WxIsaac64) throw new Error("解密模块加载失败");
 
+    // Skip videos already saved in earlier clicks, so each click advances to
+    // the next available one instead of downloading the same file again.
+    let downloaded = new Set(cfg.downloaded || []);
+    let pool = videos.filter((v) => v.seed && !downloaded.has(v.key)).slice(0, 30);
+    if (!pool.length) {
+      downloaded = new Set();
+      pool = videos.filter((v) => v.seed).slice(0, 30);
+      log("    已下载过全部已知视频，重新从头开始", "warn");
+    } else if (downloaded.size) {
+      log(`    已跳过 ${downloaded.size} 个此前下载过的视频`, "info");
+    }
+
     let target = null;
-    const pool = videos.filter((v) => v.seed).slice(0, 12);
     for (let i = 0; i < pool.length; i++) {
       const v = pool[i];
       const tag = `${i + 1}/${pool.length} ${v.w}x${v.h} ${(v.dur / 1000).toFixed(0)}s`;
@@ -534,6 +545,8 @@ async function doDownload() {
     log("[5/5] 已写出完整视频", "ok");
     busy = false;
     const cost = ((Date.now() - t0) / 1000).toFixed(1);
+    cfg.downloaded = [...new Set([...(cfg.downloaded || []), target.key])].slice(-200);
+    saveConfig(cfg);
     log(`✓ 完成（${cost}s）：${finalPath}`, "ok");
     state("ready");
     send({ ev: "done", file: finalPath, size });

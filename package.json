@@ -1,6 +1,6 @@
 {
   "name": "wechat-channels-downloader",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "微信视频号视频下载器 - 抓取并解密视频号视频",
   "main": "main.js",
   "author": "local build (engine: my832)",

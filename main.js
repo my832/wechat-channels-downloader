@@ -16,6 +16,17 @@ const fs = require("fs");
 const { fork } = require("child_process");
 
 const ROOT = __dirname;
+
+/*
+ * The original userData folder (%APPDATA%\wechat-channels-downloader) ended up
+ * with broken ACLs: Chromium could not create its cache and the single-instance
+ * lock failed, so the app quit immediately on launch. Use a clean, writable
+ * location instead and migrate the old config/tools once.
+ */
+const USER_DATA_DIR = path.join(process.env.LOCALAPPDATA || app.getPath("appData"), "WxChannelsDL");
+try {
+  app.setPath("userData", USER_DATA_DIR);
+} catch {}
 const ICON = path.join(ROOT, "assets", "icon.png");
 const ICO = path.join(ROOT, "assets", "icon.ico");
 
@@ -47,11 +58,31 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 /* ------------------------------------------------------------- engine pipe */
+/** Copy config + wasm tools from the legacy (ACL-broken) folder, once. */
+function migrateLegacyData() {
+  try {
+    const oldDir = path.join(app.getPath("appData"), "wechat-channels-downloader");
+    if (!fs.existsSync(oldDir)) return;
+    const oldCfg = path.join(oldDir, "config.json");
+    if (fs.existsSync(oldCfg) && !fs.existsSync(configPath())) {
+      fs.copyFileSync(oldCfg, configPath());
+    }
+    const oldTools = path.join(oldDir, "tools");
+    const newTools = toolsDir();
+    if (fs.existsSync(oldTools) && !fs.existsSync(path.join(newTools, "wasm", "decoded.wasm"))) {
+      fs.cpSync(oldTools, newTools, { recursive: true });
+    }
+  } catch (e) {
+    console.log("[migrate] skipped:", e && e.message);
+  }
+}
+
 function startEngine() {
   try {
     fs.mkdirSync(userDir(), { recursive: true });
     fs.mkdirSync(toolsDir(), { recursive: true });
   } catch {}
+  migrateLegacyData();
   engine = fork(path.join(ROOT, "engine.js"), [], {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     windowsHide: true,

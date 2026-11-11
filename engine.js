@@ -1,27 +1,24 @@
 "use strict";
 /*
- * WeChat Channels Downloader - resident engine (memory-read edition)
+ * WeChat Channels Downloader - resident engine (v2.1 memory edition)
  *
  * Original capture/decrypt research: my832/wechat-channels-downloader (MIT).
  *
- * ARCHITECTURE NOTE
- * -----------------
- * The original tool hijacked the *system* proxy (HKCU Internet Settings) and
- * installed a mitmproxy root CA to sniff HTTPS. That means every other app on
- * the machine is dragged through it, and it fights with Clash / other proxies
- * over the same registry key.
+ * KEY FACTS (learned by probing real processes — verify before "improving"):
+ *  - The video JSON lives in WeChat memory as **UTF-16** text. Searching ASCII
+ *    finds nothing at all.
+ *  - Inside that JSON, "url" with path /251/20302/stodownload is the VIDEO.
+ *    /251/20304/... is only a cover/thumb image (tiny, only ~26KB).
+ *  - The playable link is  url + url_token.  Without the token the CDN
+ *    answers HTTP 400.
+ *  - "decode_key" sits AFTER the media array inside the same object, so we
+ *    anchor the scan on decode_key and look ~16KB backwards for the urls.
+ *  - Only the first 128KB is XOR-encrypted with an Isaac64 keystream.
  *
- * This build removes all of that. The stodownload URL and the isaac64 seed both
- * live in plain sight inside the WeChat player's own process memory, so we just
- * read them:
+ * Consequences: no system proxy, no root certificate, no network capture,
+ * and nothing outside WeChat is touched.
  *
- *   read WeChat memory -> parse stodownload URL + decode_key
- *   -> curl download -> WASM keystream -> XOR first 128KB -> playable MP4
- *
- * Consequences: no system proxy, no root certificate, no network capture, and
- * nothing outside WeChat is touched.
- *
- * IPC protocol (process.send / process.on("message")):
+ * IPC protocol:
  *   out: { ev: "state"|"log"|"captured"|"progress"|"done"|"error" }
  *   in : { cmd: "download" | "scan" | "setOutDir" | "shutdown" }
  */
@@ -30,7 +27,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const zlib = require("zlib");
-const { execFileSync, spawn } = require("child_process");
+const { execFileSync, spawnSync, spawn } = require("child_process");
 
 const ENCLEN = 131072;
 const WASM_BASE = "https://aladin.wxqcloud.qq.com/aladin/ffmepeg/video-decode/1.2.46/";
@@ -40,11 +37,10 @@ const TOOLS = process.env.WXDL_TOOLS || path.join(ROOT, "tools");
 const WORK = path.join(os.tmpdir(), "channels_dl_work");
 const WASM_FILE = path.join(TOOLS, "wasm", "decoded.wasm");
 const WASM_LOADER = path.join(TOOLS, "wasm", "wasm_video_decode_plain.js");
-const SCAN_PS1 = path.join(WORK, "scan_wechat.ps1");
+const SCAN_PS1 = path.join(WORK, "scan_videos.ps1");
 const CONFIG_FILE = process.env.WXDL_CONFIG || path.join(ROOT, "config.json");
 
 /* ------------------------------------------------------------------ utils */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ts = () => new Date().toISOString().slice(11, 19);
 const ensureDir = (p) => fs.mkdirSync(p, { recursive: true });
 
@@ -58,14 +54,6 @@ function log(msg, level) {
 }
 function state(s, extra) {
   send({ ev: "state", state: s, ...(extra || {}) });
-}
-
-function ps(script) {
-  return execFileSync(
-    "powershell.exe",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-    { encoding: "utf8", timeout: 180000, windowsHide: true }
-  );
 }
 function downloadTo(url, dest, onTick) {
   return new Promise((resolve, reject) => {
@@ -112,34 +100,28 @@ function defaultOutDir() {
 }
 
 /* ------------------------------------------------ legacy proxy clean-up */
-/**
- * Earlier builds of this app pointed the whole machine at 127.0.0.1:8080.
- * If that residue is still around (crash / forced kill), the machine looks
- * offline. Undo it once, then never touch the registry again.
- */
 function cleanupLegacyProxy() {
   try {
-    const out = ps(
-      `(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings') | ForEach-Object { "$($_.ProxyEnable)|$($_.ProxyServer)" }`
+    const out = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        `(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings') | ForEach-Object { "$($_.ProxyEnable)|$($_.ProxyServer)" }`,
+      ],
+      { encoding: "utf8", timeout: 30000, windowsHide: true }
     ).trim();
-    const [en, server] = out.split("|");
-    if (server === "127.0.0.1:8080") {
-      ps(`
-        $reg='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
-        $saved = ${JSON.stringify(loadConfig().proxyState || {})}
-        Set-ItemProperty $reg ProxyEnable 0
-        Remove-ItemProperty $reg ProxyServer -ErrorAction SilentlyContinue
-        Add-Type -Namespace W -Name N -MemberDefinition '[DllImport("wininet.dll")] public static extern bool InternetSetOption(IntPtr h, int o, IntPtr b, int l);'
-        [W.N]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0) | Out-Null
-        [W.N]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0) | Out-Null
-        'ok'
-      `);
-      log("已清理旧版本残留的系统代理设置（不会再有第二次）", "warn");
-    }
-    const cfg = loadConfig();
-    if (cfg.proxyState) {
-      delete cfg.proxyState;
-      saveConfig(cfg);
+    if (out.split("|")[1] === "127.0.0.1:8080") {
+      execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `$reg='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'; Set-ItemProperty $reg ProxyEnable 0; Remove-ItemProperty $reg ProxyServer -ErrorAction SilentlyContinue; 'ok'`,
+        ],
+        { encoding: "utf8", timeout: 30000, windowsHide: true }
+      );
+      log("已清理旧版本残留的系统代理设置", "warn");
     }
   } catch {}
 }
@@ -151,7 +133,7 @@ Add-Type @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public class BSW {
+public class BSX {
   public static List<int> Find(byte[] hay, byte[] nd, int max) {
     var hits = new List<int>();
     if (nd.Length == 0 || hay.Length < nd.Length) return hits;
@@ -166,7 +148,7 @@ public class BSW {
     return hits;
   }
 }
-public class MMW {
+public class MMX {
   [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int a, bool i, int pid);
   [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
   [DllImport("kernel32.dll")] public static extern int VirtualQueryEx(IntPtr h, IntPtr addr, out MBI info, int len);
@@ -175,164 +157,131 @@ public class MMW {
   public struct MBI { public IntPtr BaseAddress; public IntPtr AllocationBase; public uint AllocationProtect; public IntPtr RegionSize; public uint State; public uint Protect; public uint Type; }
 }
 "@
-$needle = [Text.Encoding]::ASCII.GetBytes('stodownload')
-# URL-safe charset used by the CDN link
-$urlPat = 'https://[A-Za-z0-9\.\-/_%\?=&\:;,\+~\$@!\*''\(\)]+stodownload[A-Za-z0-9\.\-/_%\?=&\:;,\+~\$@!\*''\(\)]*'
-$dkPat  = 'decode_key[\\"]*[:=]+[\\"]*(\d{6,12})'
-
-$targets = @()
-foreach ($n in @('WeChatAppEx','Weixin','WeChat')) {
-  $targets += Get-Process $n -ErrorAction SilentlyContinue
-}
-if ($targets.Count -eq 0) { Write-Output 'NOWECHAT'; exit 0 }
-
-$playerHit = $false
-foreach ($p in $targets) {
-  # once the Channels player itself yielded links, the main-process caches are
-  # just history noise -> don't even read them
-  if ($playerHit -and $p.ProcessName -ne 'WeChatAppEx') { continue }
-  $h = [MMW]::OpenProcess(0x439, $false, $p.Id)
+$needle = [Text.Encoding]::Unicode.GetBytes('decode_key')
+$procs = @(Get-Process WeChatAppEx -ErrorAction SilentlyContinue)
+if ($procs.Count -eq 0) { Write-Output 'NOWECHAT'; exit 0 }
+foreach ($p in $procs) {
+  $h = [MMX]::OpenProcess(0x439, $false, $p.Id)
   if ($h -eq [IntPtr]::Zero) { continue }
   $addr = [IntPtr]::Zero
   while ($true) {
-    $mbi = New-Object MMW+MBI
-    $r = [MMW]::VirtualQueryEx($h, $addr, [ref]$mbi, [Runtime.InteropServices.Marshal]::SizeOf($mbi))
+    $mbi = New-Object MMX+MBI
+    $r = [MMX]::VirtualQueryEx($h, $addr, [ref]$mbi, [Runtime.InteropServices.Marshal]::SizeOf($mbi))
     if ($r -eq 0) { break }
     $size = [long]$mbi.RegionSize
     if ($size -le 0) { break }
     if ($size -lt 400MB -and $mbi.State -eq 0x1000 -and (($mbi.Protect -band 0xEE) -ne 0)) {
       $buf = New-Object byte[] $size
       $read = 0
-      if ([MMW]::ReadProcessMemory($h, $addr, $buf, $size, [ref]$read) -and $read -gt 0) {
-        $hits = [BSW]::Find($buf, $needle, 40)
+      if ([MMX]::ReadProcessMemory($h, $addr, $buf, $size, [ref]$read) -and $read -gt 0) {
+        $hits = [BSX]::Find($buf, $needle, 400)
         foreach ($pos in $hits) {
-          $s = [Math]::Max(0, $pos - 500)
-          $e = [Math]::Min($read - 1, $pos + 4000)
+          # the urls sit BEFORE decode_key inside the same JSON object
+          $s = [Math]::Max(0, $pos - 16000)
+          $e = [Math]::Min($read - 1, $pos + 1200)
           if ($e -le $s) { continue }
-          $txt = [Text.Encoding]::ASCII.GetString($buf, $s, $e - $s)
-          foreach ($m in [regex]::Matches($txt, $urlPat)) {
-            Write-Output ("URL " + $p.ProcessName + " " + $m.Value)
-            if ($p.ProcessName -eq 'WeChatAppEx') { $playerHit = $true }
-          }
-          foreach ($m in [regex]::Matches($txt, $dkPat)) {
-            Write-Output ("SEED " + $p.ProcessName + " " + $m.Groups[1].Value)
-          }
+          if (($e - $s) % 2 -ne 0) { $e = $e - 1 }
+          $txt = [Text.Encoding]::Unicode.GetString($buf, $s, $e - $s)
+          $clean = -join ($txt.ToCharArray() | ForEach-Object { if ([int]$_ -ge 32 -and [int]$_ -le 126) { $_ } else { ' ' } })
+          Write-Output ("REC " + $clean)
         }
       }
     }
     $addr = [IntPtr]([long]$addr + $size)
   }
-  [MMW]::CloseHandle($h) | Out-Null
+  [MMX]::CloseHandle($h) | Out-Null
 }
-Write-Output 'SCANDONE'
+Write-Output 'END'
 `;
 
 /**
- * Read WeChat memory once and pull out every stodownload URL plus seed candidates.
- * @returns {{urls: Array<{proc:string,url:string}>, seeds: string[]}}
+ * Read WeChat memory and return candidate videos, newest-first.
+ * @returns {{videos: Array, noWechat: boolean}}
  */
-function scanWeChatMemory() {
+function scanWeChatVideos() {
   fs.writeFileSync(SCAN_PS1, SCAN_SRC, "utf8");
   let out = "";
   try {
     out = execFileSync(
       "powershell.exe",
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCAN_PS1],
-      { encoding: "utf8", timeout: 300000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }
+      { encoding: "utf8", timeout: 300000, windowsHide: true, maxBuffer: 192 * 1024 * 1024 }
     );
   } catch (e) {
     out = e.stdout || "";
   }
-  if (out.includes("NOWECHAT")) return { noWechat: true, urls: [], seeds: [] };
+  if (out.includes("NOWECHAT")) return { videos: [], noWechat: true };
 
-  const urls = [];
-  const seeds = [];
+  const urlRe = /\\?"(?:url|video_url|play_url)\\?"\s*:\s*\\?"(https:\/\/finder\.video\.qq\.com\/251\/20302\/stodownload[^"\\]*)/g;
+  const tokenRe = /\\?"(?:url_token|token_url)\\?"\s*:\s*\\?"(&token=[^"\\]*)/g;
+  const keyRe = /\\?"decode_key\\?"\s*:\s*\\?"?(\d{6,14})/g;
+  const durRe = /\\?"duration_ms\\?"\s*:\s*(\d{3,9})/g;
+  const wRe = /\\?"width\\?"\s*:\s*(\d{2,5})/g;
+  const hRe = /\\?"height\\?"\s*:\s*(\d{2,5})/g;
+
+  const videos = [];
+  let order = 0;
+
   for (const line of out.split(/\r?\n/)) {
-    if (line.startsWith("URL ")) {
-      const rest = line.slice(4);
-      const sp = rest.indexOf(" ");
-      if (sp < 0) continue;
-      urls.push({ proc: rest.slice(0, sp), url: rest.slice(sp + 1).trim() });
-    } else if (line.startsWith("SEED ")) {
-      const rest = line.slice(5);
-      const sp = rest.indexOf(" ");
-      if (sp < 0) continue;
-      seeds.push(rest.slice(sp + 1).trim());
-    }
-  }
-  return { urls, seeds, noWechat: false };
-}
+    if (!line.startsWith("REC ")) continue;
+    const text = line.slice(4);
+    order++;
 
-/** Memory buffers can cut a %XX escape in half — never let that throw. */
-function safeDecode(s) {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
-}
-/** Drop a dangling "%" or "%A" left over from a truncated buffer read. */
-function cleanUrl(u) {
-  return u.replace(/%[0-9A-Fa-f]?$/, "");
-}
+    const keyM = [...text.matchAll(keyRe)];
+    if (!keyM.length) continue;
+    const seed = keyM[keyM.length - 1][1];
+    const keyPos = keyM[keyM.length - 1].index;
 
-/** Group URLs by encfilekey (one key = one video, many byte-range segments). */
-function collectVideos(scan) {
-  const map = new Map();
-  let idx = 0;
-  for (const { proc, url } of scan.urls) {
-    idx++;
-    const clean = cleanUrl(url);
-    const m = clean.match(/encfilekey=([^&]+)/);
-    if (!m) continue; // truncated fragment, not a usable link
-    const key = safeDecode(m[1]);
-    if (key.length < 16) continue;
-    const isPlayer = /WeChatAppEx/i.test(proc);
-    const prev = map.get(key);
-    if (!prev) {
-      map.set(key, { key, url: clean, proc, player: isPlayer, hits: 1, idx });
-    } else {
-      prev.hits++;
-      prev.idx = idx;
-      // prefer a link from the player process, and the longest (most complete) one
-      if ((isPlayer && !prev.player) || clean.length > prev.url.length) {
-        prev.url = clean;
-        prev.proc = proc;
-        prev.player = prev.player || isPlayer;
+    const tokenM = [...text.matchAll(tokenRe)];
+    const token = tokenM.length ? tokenM[0][1].replace(/\\+$/, "") : "";
+
+    // urls appearing BEFORE the decode_key belong to this object
+    const urls = [...text.matchAll(urlRe)]
+      .filter((m) => m.index < keyPos)
+      .map((m) => m[1].replace(/\\+$/, ""));
+
+    if (!urls.length) continue;
+
+    const dur = ([...text.matchAll(durRe)].map((m) => +m[1]).pop()) || 0;
+    const w = ([...text.matchAll(wRe)].map((m) => +m[1]).pop()) || 0;
+    const h = ([...text.matchAll(hRe)].map((m) => +m[1]).pop()) || 0;
+
+    // several urls = several renditions of the SAME video; keep them all as candidates
+    for (const u of urls.slice(-6)) {
+      const ek = u.match(/encfilekey=([^&]+)/);
+      if (!ek) continue;
+      let key;
+      try {
+        key = decodeURIComponent(ek[1]);
+      } catch {
+        key = ek[1];
       }
+      if (key.length < 16) continue;
+      videos.push({
+        key,
+        url: token ? u + token : u,
+        seed,
+        dur,
+        w,
+        h,
+        order,
+        hasToken: !!token,
+      });
     }
   }
-  // player-sourced first; among those, the highest memory address (= most
-  // recently allocated) is the best guess for "what is playing right now"
-  return [...map.values()].sort(
-    (a, b) => (b.player ? 1 : 0) - (a.player ? 1 : 0) || b.idx - a.idx
-  );
-}
 
-/** Cheap liveness probe: pull the first 1KB and see if the CDN still serves it. */
-function probeUrl(url) {
-  return new Promise((resolve) => {
-    const probe = path.join(WORK, `probe_${Date.now()}.bin`);
-    const child = spawn(
-      "curl.exe",
-      ["-sSL", "-r", "0-1023", "--max-time", "10", "-o", probe, "-w", "%{http_code}", url],
-      { windowsHide: true }
-    );
-    let code = "";
-    child.stdout.on("data", (d) => (code += d.toString()));
-    child.on("error", () => resolve(false));
-    child.on("close", () => {
-      let ok = false;
-      try {
-        const size = fs.existsSync(probe) ? fs.statSync(probe).size : 0;
-        ok = size >= 256 && /^(200|206)$/.test(code.trim());
-      } catch {}
-      try {
-        if (fs.existsSync(probe)) fs.unlinkSync(probe);
-      } catch {}
-      resolve(ok);
-    });
-  });
+  // dedupe by encfilekey, keep the highest resolution
+  const byKey = new Map();
+  for (const v of videos) {
+    const prev = byKey.get(v.key);
+    if (!prev || v.w * v.h > prev.w * prev.h || (v.w * v.h === prev.w * prev.h && v.order > prev.order)) {
+      byKey.set(v.key, v);
+    }
+  }
+  const list = [...byKey.values()];
+  // newest-first: later memory allocation = more recently touched by the player
+  list.sort((a, b) => b.order - a.order);
+  return { videos: list, noWechat: false };
 }
 
 /* --------------------------------------------------------- WASM decryption */
@@ -351,8 +300,7 @@ async function loadWasmModule() {
   };
   global.Module = { wasmBinary: global.wasmBinary, print: () => {}, printErr: () => {} };
   const loaderSrc = fs.readFileSync(WASM_LOADER, "utf8");
-  // strict-mode file: direct eval would scope `var Module` away, so use the
-  // indirect form which binds the loader's Module to global.Module.
+  // strict mode: indirect eval so the loader's `var Module` binds to global.Module
   (0, eval)(loaderSrc);
   return new Promise((resolve) => {
     const check = () => {
@@ -365,12 +313,13 @@ async function loadWasmModule() {
   });
 }
 
-function xorCheck(Module, encHead, seed) {
+/** Generate `len` keystream bytes for seed and check the MP4 'ftyp' box. */
+function verifySeed(Module, head, seed, len) {
   return new Promise((resolve) => {
     try {
       let ks = null;
-      global.__isaacCb = (ptr, len) => {
-        ks = new Uint8Array(Module.HEAPU8.buffer, ptr, len);
+      global.__isaacCb = (ptr, l) => {
+        ks = new Uint8Array(Module.HEAPU8.buffer, ptr, l);
       };
       const dec = new Module.WxIsaac64(String(seed));
       let settled = false;
@@ -383,21 +332,21 @@ function xorCheck(Module, encHead, seed) {
         resolve(ok);
       };
       const finish = () => {
-        if (!ks || ks.length < ENCLEN) {
+        if (!ks || ks.length < len) {
           setTimeout(finish, 30);
           return;
         }
         const rev = new Uint8Array(ks).reverse();
         let ok = true;
         for (let i = 4; i < 8; i++) {
-          if (String.fromCharCode(encHead[i] ^ rev[i]) !== "ftyp"[i - 4]) {
+          if (String.fromCharCode(head[i] ^ rev[i]) !== "ftyp"[i - 4]) {
             ok = false;
             break;
           }
         }
         done(ok);
       };
-      const r = dec.generate(ENCLEN);
+      const r = dec.generate(len);
       if (r && typeof r.then === "function") r.then(() => setTimeout(finish, 30)).catch(() => done(false));
       else setTimeout(finish, 50);
       setTimeout(() => done(false), 8000);
@@ -478,10 +427,21 @@ function uniqueOutPath(dir, stamp) {
   return p;
 }
 
+/** Pull only the first 128KB to test a link+key pair cheaply. */
+function fetchHead128(url, dest) {
+  const r = spawnSync(
+    "curl.exe",
+    ["-sSL", "-r", `0-${ENCLEN - 1}`, "--max-time", "30", "-o", dest, "-w", "%{http_code}", url],
+    { encoding: "utf8", windowsHide: true, timeout: 40000 }
+  );
+  const code = (r.stdout || "").trim();
+  const size = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
+  return { code, size };
+}
+
 /* --------------------------------------------------------------- main flow */
 let cfg = {};
 let busy = false;
-let lastScan = null;
 
 async function doDownload() {
   if (busy) {
@@ -493,116 +453,90 @@ async function doDownload() {
   let tmpFile = null;
   try {
     state("downloading", { step: 1 });
-    log("[1/5] 读取微信内存，定位正在播放的视频…（约 10 秒）");
-    const scan = scanWeChatMemory();
+    log("[1/5] 读取微信内存（约 15 秒）…");
+    const scan = scanWeChatVideos();
     if (scan.noWechat) throw new Error("没有找到微信进程，请先打开微信并播放视频号视频");
 
-    const videos = collectVideos(scan);
-    lastScan = videos;
+    const videos = scan.videos;
     send({ ev: "captured", count: videos.length });
     if (!videos.length) {
       throw new Error(
-        "微信内存里没有找到视频地址。请先在视频号里点开视频并播放几秒（看过的拖一下进度条），再点下载。"
+        "内存里没有找到视频。请先在视频号里点开视频、播放几秒（看过的拖一下进度条），再点下载。"
       );
     }
+    const withToken = videos.filter((v) => v.hasToken).length;
+    log(`    找到 ${videos.length} 个视频（${withToken} 个含完整播放令牌）`, "ok");
 
-    /* Memory keeps history; only the freshest links still answer. Probe, then
-     * verify the payload really is a video before committing to it. */
-    state("downloading", { step: 2 });
     const outDir = cfg.outDir || defaultOutDir();
     ensureDir(outDir);
     tmpFile = path.join(WORK, `dl_${Date.now()}.enc.mp4`);
 
-    log(`    内存中找到 ${videos.length} 个链接，正在找还活着的那一条…`);
-    let target = null;
-    let size = 0;
-    const pool = videos.slice(0, 8);
-    for (let i = 0; i < pool.length; i++) {
-      const c = pool[i];
-      const tag = `${i + 1}/${pool.length} ${c.key.slice(0, 10)}…`;
-      if (!(await probeUrl(c.url))) {
-        log(`    ${tag} 已失效`, "warn");
-        continue;
-      }
-      let lastBytes = 0;
-      try {
-        await downloadTo(c.url, tmpFile, (bytes) => {
-          if (bytes - lastBytes > 262144) {
-            lastBytes = bytes;
-            send({ ev: "progress", phase: "download", bytes });
-          }
-        });
-      } catch (e) {
-        log(`    ${tag} 下载失败：${e.message}`, "warn");
-        continue;
-      }
-      const sz = fs.existsSync(tmpFile) ? fs.statSync(tmpFile).size : 0;
-      if (sz < 200 * 1024) {
-        log(`    ${tag} 内容异常（只有 ${(sz / 1024).toFixed(0)} KB），换下一个`, "warn");
-        continue;
-      }
-      target = c;
-      size = sz;
-      log(`    ${tag} 有效 ✓`, "ok");
-      break;
-    }
-    if (!target) {
-      throw new Error(
-        "内存里的视频链接都已失效或内容异常。请在微信里重新点开这个视频、播放几秒，然后马上再点下载。"
-      );
-    }
-    const encPrefix = target.key.slice(0, 24);
-    log(`    目标 encfilekey=${encPrefix.slice(0, 12)}…（来源 ${target.proc}）`, "ok");
-    log(`    下载完成 ${(size / 1048576).toFixed(2)} MB`, "ok");
-
-    const head = fs.readFileSync(tmpFile).subarray(0, ENCLEN);
-    if (head.subarray(4, 8).toString("latin1") === "ftyp") {
-      log("    该视频未加密，直接输出", "ok");
-      const finalPath = uniqueOutPath(outDir, stampName());
-      fs.copyFileSync(tmpFile, finalPath);
-      finish(finalPath, size, t0);
-      return;
-    }
-
-    /* 3. seed */
-    state("downloading", { step: 3 });
-    log("[3/5] 校验内存中的解密种子…");
+    /* 2. pick a working (url, key) pair by verifying the first 128KB */
+    state("downloading", { step: 2 });
+    log("[2/5] 逐个校验链接与密钥…");
     const Module = await loadWasmModule();
     if (!Module || !Module.WxIsaac64) throw new Error("解密模块加载失败");
 
-    let seed = null;
-    let cands = [...new Set([...scan.seeds, ...(cfg.lastSeeds || [])])].filter((s) =>
-      /^\d{6,12}$/.test(s)
-    );
-    for (const m of target.url.matchAll(/(?:svrnonce|_pUid_|uzid)=?-?(\d{8,12})/g)) cands.push(m[1]);
-    cands = [...new Set(cands)].slice(0, 80);
-    log(`    候选种子 ${cands.length} 个，逐一验证…`);
-    for (let i = 0; i < cands.length; i++) {
-      send({ ev: "progress", phase: "seed", current: i + 1, total: cands.length });
-      if (cands.length > 10 && i % 5 === 0) log(`    验证中 ${i + 1}/${cands.length}`);
-      if (await xorCheck(Module, head, cands[i])) {
-        seed = cands[i];
+    let target = null;
+    const pool = videos.filter((v) => v.seed).slice(0, 12);
+    for (let i = 0; i < pool.length; i++) {
+      const v = pool[i];
+      const tag = `${i + 1}/${pool.length} ${v.w}x${v.h} ${(v.dur / 1000).toFixed(0)}s`;
+      const probe = path.join(WORK, `probe_${i}.bin`);
+      const { code, size } = fetchHead128(v.url, probe);
+      if (size < 1024) {
+        log(`    ${tag} → HTTP ${code}，内容过小`, "warn");
+        try { fs.unlinkSync(probe); } catch {}
+        continue;
+      }
+      const head = fs.readFileSync(probe).subarray(0, ENCLEN);
+      const plain = head.subarray(4, 8).toString("latin1") === "ftyp";
+      const ok = plain || (await verifySeed(Module, head, v.seed, ENCLEN));
+      if (ok) {
+        log(`    ${tag} → ${plain ? "未加密" : "密钥匹配"} ✓`, "ok");
+        target = v;
+        try { fs.unlinkSync(probe); } catch {}
         break;
       }
+      log(`    ${tag} → 密钥不匹配`, "warn");
+      try { fs.unlinkSync(probe); } catch {}
     }
-    if (!seed) {
+    if (!target) {
       throw new Error(
-        "没有验证出解密种子。请保持视频号播放器窗口打开（不要关闭），重新播放一下视频再点下载。"
+        "没有验证成功的视频。请保持视频号播放器窗口打开、视频正在播放，然后再点一次下载。"
       );
     }
-    log(`    种子 = ${seed}`, "ok");
+
+    /* 3. download full file */
+    state("downloading", { step: 3 });
+    log(`[3/5] 下载视频 ${target.w}x${target.h}…`);
+    let lastBytes = 0;
+    await downloadTo(target.url, tmpFile, (bytes) => {
+      if (bytes - lastBytes > 524288) {
+        lastBytes = bytes;
+        send({ ev: "progress", phase: "download", bytes });
+        log(`    已接收 ${(bytes / 1048576).toFixed(1)} MB`);
+      }
+    });
+    const size = fs.statSync(tmpFile).size;
+    if (size < 128 * 1024) throw new Error("下载内容异常（文件过小）");
+    log(`    下载完成 ${(size / 1048576).toFixed(2)} MB`, "ok");
 
     /* 4. decrypt */
     state("downloading", { step: 4 });
     log("[4/5] 解密视频头部…");
-    const video = await decryptHead(Module, tmpFile, seed);
+    const videoBuf = await decryptHead(Module, tmpFile, target.seed);
 
     /* 5. write */
     state("downloading", { step: 5 });
     const finalPath = uniqueOutPath(outDir, stampName());
-    fs.writeFileSync(finalPath, video);
+    fs.writeFileSync(finalPath, videoBuf);
     log("[5/5] 已写出完整视频", "ok");
-    finish(finalPath, size, t0);
+    busy = false;
+    const cost = ((Date.now() - t0) / 1000).toFixed(1);
+    log(`✓ 完成（${cost}s）：${finalPath}`, "ok");
+    state("ready");
+    send({ ev: "done", file: finalPath, size });
   } catch (e) {
     busy = false;
     const msg = (e && e.message) || String(e);
@@ -616,14 +550,6 @@ async function doDownload() {
   }
 }
 
-function finish(finalPath, size, t0) {
-  busy = false;
-  const t = ((Date.now() - t0) / 1000).toFixed(1);
-  log(`✓ 完成（${t}s）：${finalPath}`, "ok");
-  state("ready");
-  send({ ev: "done", file: finalPath, size });
-}
-
 /* --------------------------------------------------------------- ipc input */
 process.on("message", (msg) => {
   if (!msg || !msg.cmd) return;
@@ -633,9 +559,8 @@ process.on("message", (msg) => {
       break;
     case "scan":
       try {
-        const scan = scanWeChatMemory();
-        const videos = collectVideos(scan);
-        send({ ev: "captured", count: videos.length });
+        const s = scanWeChatVideos();
+        send({ ev: "captured", count: s.videos.length });
       } catch {}
       break;
     case "setOutDir":
@@ -649,12 +574,8 @@ process.on("message", (msg) => {
   }
 });
 
-process.on("disconnect", () => {
-  setTimeout(() => process.exit(0), 100);
-});
-process.on("uncaughtException", (e) => {
-  log("内部错误: " + (e && e.message), "err");
-});
+process.on("disconnect", () => setTimeout(() => process.exit(0), 100));
+process.on("uncaughtException", (e) => log("内部错误: " + (e && e.message), "err"));
 
 /* ------------------------------------------------------------------- boot */
 async function boot() {
